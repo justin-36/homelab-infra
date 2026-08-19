@@ -1,0 +1,119 @@
+---
+- name: Pick best node
+  uri:
+    url: "https://{{ proxmox_host }}:8006/api2/json/nodes/{{ item }}/status"
+    method: GET
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_user }}!{{ proxmox_token_id }}={{ proxmox_token }}"
+    validate_certs: false
+  register: node_stats_single
+  loop: "{{ proxmox_nodes }}"
+
+- name: Build node scores
+  set_fact:
+    node_scores: "{{ node_scores | default([]) + [{'node': item.item, 'score': (item.json.data.cpu * 100) + (item.json.data.memory.used / item.json.data.memory.total * 100)}] }}"
+  loop: "{{ node_stats_single.results }}"
+
+- name: Set best node for this VM
+  set_fact:
+    current_node: "{{ (node_scores | sort(attribute='score') | first).node }}"
+  when: target_node == "auto"
+
+- name: Use specified node
+  set_fact:
+    current_node: "{{ target_node }}"
+  when: target_node != "auto"
+
+- name: Reset node scores for next iteration
+  set_fact:
+    node_scores: []
+
+- name: Get next VMID
+  uri:
+    url: "https://{{ proxmox_host }}:8006/api2/json/cluster/nextid"
+    method: GET
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_user }}!{{ proxmox_token_id }}={{ proxmox_token }}"
+    validate_certs: false
+  register: vmid_result
+
+- name: Set VM name and ID
+  set_fact:
+    current_vmid: "{{ vmid_result.json.data }}"
+    current_name: "{{ template_name.split('-')[0] }}-{{ vmid_result.json.data }}"
+
+- name: Show plan
+  debug:
+    msg: "Creating {{ current_name }} ({{ current_vmid }}) on {{ current_node }} → ceph-vms"
+
+- name: Clone template to ceph-vms
+  uri:
+    url: "https://{{ proxmox_host }}:8006/api2/json/nodes/{{ template_node }}/qemu/{{ template_vmid }}/clone"
+    method: POST
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_user }}!{{ proxmox_token_id }}={{ proxmox_token }}"
+    body_format: form-urlencoded
+    body:
+      newid: "{{ current_vmid }}"
+      name: "{{ current_name }}"
+      target: "{{ current_node }}"
+      full: 0
+    validate_certs: false
+  register: clone_task
+
+- name: Wait for clone to complete
+  uri:
+    url: "https://{{ proxmox_host }}:8006/api2/json/nodes/{{ template_node }}/tasks/{{ clone_task.json.data }}/status"
+    method: GET
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_user }}!{{ proxmox_token_id }}={{ proxmox_token }}"
+    validate_certs: false
+  register: task_status
+  until: task_status.json.data.status == "stopped"
+  retries: 30
+  delay: 10
+
+- name: Check clone succeeded
+  fail:
+    msg: "Clone failed: {{ task_status.json.data.exitstatus }}"
+  when: task_status.json.data.exitstatus != "OK"
+
+- name: Start VM
+  uri:
+    url: "https://{{ proxmox_host }}:8006/api2/json/nodes/{{ current_node }}/qemu/{{ current_vmid }}/status/start"
+    method: POST
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_user }}!{{ proxmox_token_id }}={{ proxmox_token }}"
+    validate_certs: false
+
+- name: Wait for IP
+  uri:
+    url: "https://{{ proxmox_host }}:8006/api2/json/nodes/{{ current_node }}/qemu/{{ current_vmid }}/agent/network-get-interfaces"
+    method: GET
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_user }}!{{ proxmox_token_id }}={{ proxmox_token }}"
+    validate_certs: false
+    status_code: [200, 500]
+  register: agent_result
+  failed_when: false
+  until: >
+    agent_result.status == 200 and
+    agent_result.json.data is not none and
+    agent_result.json.data.result |
+    selectattr('name', 'eq', 'eth0') | list | length > 0
+  retries: 30
+  delay: 10
+
+- name: Extract IP
+  set_fact:
+    current_ip: "{{ agent_result.json.data.result | selectattr('name', 'eq', 'eth0') | map(attribute='ip-addresses') | first | selectattr('ip-address-type', 'eq', 'ipv4') | map(attribute='ip-address') | first }}"
+
+- name: Show IP
+  debug:
+    msg: "{{ current_name }} is up at {{ current_ip }}"
+
+- name: Add to inventory with VM name
+  add_host:
+    name: "{{ current_ip }}"
+    groups: new_vms
+    vm_name: "{{ current_name }}"

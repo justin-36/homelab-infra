@@ -1,0 +1,56 @@
+---
+- name: Install Tanium client
+  hosts: "{{ target_hosts | default('new_vms') }}"
+  become: yes
+  vars:
+    tanium_bundle: "/home/justin/lab/files/linux-client-bundle-7.8.2.1111.zip"
+
+  tasks:
+    - name: Set hostname to VM name
+      hostname:
+        name: "{{ vm_name | default(inventory_hostname) }}"
+
+    - name: Update /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        line: "127.0.1.1 {{ vm_name | default(inventory_hostname) }}"
+
+    - name: Install unzip
+      package:
+        name: unzip
+        state: present
+
+    - name: Create install directory
+      file:
+        path: /tmp/tanium-install
+        state: directory
+
+    - name: Copy Tanium bundle
+      copy:
+        src: "{{ tanium_bundle }}"
+        dest: /tmp/tanium-install/tanium-bundle.zip
+
+    - name: Extract bundle
+      unarchive:
+        src: /tmp/tanium-install/tanium-bundle.zip
+        dest: /tmp/tanium-install/
+        remote_src: yes
+
+    - name: Run installer
+      shell: cd /tmp/tanium-install && bash install.sh
+      register: install_result
+
+    - name: Show install output
+      debug:
+        var: install_result.stdout_lines
+
+    - name: Restart Tanium client to pick up new hostname
+      service:
+        name: taniumclient
+        state: restarted
+
+    - name: Clean up
+      file:
+        path: /tmp/tanium-install
+        state: absent

@@ -1,0 +1,125 @@
+---
+- name: Provision VMs from Proxmox template
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    proxmox_host: "10.0.0.10"          # overridden by Semaphore environment
+    proxmox_token_id: "root@pam!provisioner"
+    template_name: "ubuntu24-cloud-template"
+    target_node: "node1"               # overridden by Semaphore environment
+    storage: "local-nvme1-zfs"
+    vm_count: 1
+
+  tasks:
+    - name: Get next available VMIDs
+      uri:
+        url: "https://{{ proxmox_host }}:8006/api2/json/cluster/nextid"
+        method: GET
+        headers:
+          Authorization: "PVEAPIToken={{ proxmox_token_id }}={{ proxmox_token }}"
+        validate_certs: false
+      register: nextid_result
+
+    - name: Build VM names list
+      set_fact:
+        vm_names: "{{ vm_names | default([]) + [template_name.split('-')[0] + '-' + (nextid_result.json.data | int + idx) | string] }}"
+      loop: "{{ range(0, vm_count | int) | list }}"
+      loop_control:
+        index_var: idx
+
+    - name: Clone templates
+      community.general.proxmox_kvm:
+        api_host: "{{ proxmox_host }}"
+        api_token_id: "{{ proxmox_token_id }}"
+        api_token_secret: "{{ proxmox_token }}"
+        clone: "{{ template_name }}"
+        name: "{{ item }}"
+        node: "{{ target_node }}"
+        storage: "{{ storage }}"
+        full: yes
+        state: present
+        validate_certs: false
+      loop: "{{ vm_names }}"
+
+    - name: Start VMs
+      community.general.proxmox_kvm:
+        api_host: "{{ proxmox_host }}"
+        api_token_id: "{{ proxmox_token_id }}"
+        api_token_secret: "{{ proxmox_token }}"
+        name: "{{ item }}"
+        node: "{{ target_node }}"
+        state: started
+        validate_certs: false
+      loop: "{{ vm_names }}"
+
+    - name: Wait for VMs to get IPs
+      community.general.proxmox_vm_info:
+        api_host: "{{ proxmox_host }}"
+        api_token_id: "{{ proxmox_token_id }}"
+        api_token_secret: "{{ proxmox_token }}"
+        node: "{{ target_node }}"
+        name: "{{ item }}"
+        validate_certs: false
+      register: vm_info_results
+      until: >
+        vm_info_results.proxmox_vms | length > 0 and
+        vm_info_results.proxmox_vms[0].get('agent', {}).get('interfaces', []) |
+        selectattr('name', 'eq', 'eth0') | list | length > 0
+      retries: 30
+      delay: 10
+      loop: "{{ vm_names }}"
+
+    - name: Extract IPs
+      set_fact:
+        new_vm_ips: "{{ new_vm_ips | default([]) + [item.proxmox_vms[0]['agent']['interfaces'] | selectattr('name', 'eq', 'eth0') | map(attribute='ip-addresses') | first | selectattr('ip-address-type', 'eq', 'ipv4') | map(attribute='ip-address') | first] }}"
+      loop: "{{ vm_info_results.results }}"
+
+    - name: Show VM IPs
+      debug:
+        msg: "VMs ready at: {{ new_vm_ips }}"
+
+    - name: Add VMs to inventory
+      add_host:
+        name: "{{ item }}"
+        groups: new_vms
+      loop: "{{ new_vm_ips }}"
+
+- name: Install Tanium client
+  hosts: new_vms
+  become: yes
+
+  tasks:
+    - name: Install unzip
+      package:
+        name: unzip
+        state: present
+
+    - name: Create install directory
+      file:
+        path: /tmp/tanium-install
+        state: directory
+
+    - name: Copy Tanium bundle
+      copy:
+        src: /home/justin/lab/files/linux-client-bundle-7.8.2.1111.zip
+        dest: /tmp/tanium-install/tanium-bundle.zip
+
+    - name: Extract bundle
+      unarchive:
+        src: /tmp/tanium-install/tanium-bundle.zip
+        dest: /tmp/tanium-install/
+        remote_src: yes
+
+    - name: Run installer
+      shell: cd /tmp/tanium-install && bash install.sh
+      register: install_result
+
+    - name: Show install output
+      debug:
+        var: install_result.stdout_lines
+
+    - name: Clean up
+      file:
+        path: /tmp/tanium-install
+        state: absent

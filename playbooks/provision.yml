@@ -1,0 +1,28 @@
+---
+- name: Provision VMs from Proxmox template
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    proxmox_host: "10.0.0.10"          # overridden by Semaphore environment
+    proxmox_user: "root@pam"
+    proxmox_token_id: "provisioner"
+    template_name: "ubuntu24-cloud-template"
+    template_node: "node1"             # overridden by Semaphore environment
+    template_vmid: 100
+    target_node: "auto"
+    vm_count: 1
+    proxmox_nodes:
+      - node1
+      - node2
+      - node3
+      - node4
+
+  tasks:
+    - name: Provision each VM sequentially
+      include_tasks: provision-single.yml
+      loop: "{{ range(0, vm_count | int) | list }}"
+      loop_control:
+        loop_var: vm_index
+
+- import_playbook: tanium-client.yml

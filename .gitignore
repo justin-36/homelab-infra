@@ -1,0 +1,24 @@
+# Real inventory - contains internal IPs, keep local only
+inventory/hosts.ini
+
+# Ansible runtime artifacts
+*.retry
+.cache/
+.ansible/
+
+# Semaphore's own scratch/working directories - regenerate automatically, never source
+playbooks/project_1/
+**/repository_*_template_*_home/
+
+# Vault / secrets
+*.vault_pass
+vault_pass.txt
+.vault-password
+
+# Semaphore's own data (never belongs here)
+config.json
+database.sqlite
+
+# Large binaries
+*.zip
+*.iso

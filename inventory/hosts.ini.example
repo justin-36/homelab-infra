@@ -1,0 +1,12 @@
+[proxmox_nodes]
+node1 ansible_host=10.0.0.10
+node2 ansible_host=10.0.0.11
+node3 ansible_host=10.0.0.12
+node4 ansible_host=10.0.0.13
+
+[all:vars]
+ansible_user=root
+ansible_ssh_private_key_file=~/.ssh/ansible_key
+ansible_python_interpreter=/usr/bin/python3
+# StrictHostKeyChecking disabled intentionally for lab convenience — isolated VLAN, not internet-facing
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
